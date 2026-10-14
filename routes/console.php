@@ -56,16 +56,14 @@ Artisan::command('pbx3sbc:ops-fail2ban-bans', function (
     \App\Services\Ops\Fail2banBanNotifyScanner $scanner,
 ) {
     $result = $scanner->run();
-    if (! $result['enabled']) {
-        $this->info('disabled (set PBX3_OPS_FAIL2BAN_BAN_NOTIFY=true)');
-
-        return 0;
-    }
     $this->info(sprintf(
-        'seeded=%s current=%d new=%d emitted=%d skipped_cap=%d errors=%d',
+        'notify=%s seeded=%s current=%d new=%d stats=%d promoted=%d emitted=%d skipped_cap=%d errors=%d',
+        ($result['notify_enabled'] ?? false) ? 'on' : 'off',
         $result['seeded'] ? 'yes' : 'no',
         $result['current'],
         $result['new'],
+        $result['stats_incremented'] ?? 0,
+        $result['promoted'] ?? 0,
         $result['emitted'],
         $result['skipped_cap'],
         count($result['errors'])
@@ -74,5 +72,5 @@ Artisan::command('pbx3sbc:ops-fail2ban-bans', function (
         $this->warn($err);
     }
 
-    return count($result['errors']) > 0 && $result['emitted'] === 0 ? 1 : 0;
-})->purpose('Diff Fail2ban bans and notify Gatekeeper (ops email)');
+    return count($result['errors']) > 0 && ($result['emitted'] + ($result['promoted'] ?? 0) + ($result['stats_incremented'] ?? 0)) === 0 ? 1 : 0;
+})->purpose('Diff Fail2ban bans: ban_stats + auto-promote; optional Gatekeeper notify');

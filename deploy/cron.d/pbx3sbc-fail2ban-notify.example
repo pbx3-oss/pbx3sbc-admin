@@ -16,4 +16,5 @@
 SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 
+# Always runs ban_stats + auto-promote; Gatekeeper email only if PBX3_OPS_FAIL2BAN_BAN_NOTIFY=true
 * * * * * root cd /home/ubuntu/pbx3sbc-admin && /usr/bin/php artisan pbx3sbc:ops-fail2ban-bans >> /var/log/pbx3sbc-fail2ban-notify.log 2>&1
