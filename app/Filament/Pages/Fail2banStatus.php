@@ -2,8 +2,11 @@
 
 namespace App\Filament\Pages;
 
+use App\Filament\Resources\Fail2banBlacklistResource;
+use App\Models\Fail2banBlacklist;
 use App\Models\Fail2banWhitelist;
 use App\Services\Fail2banService;
+use App\Services\PermanentBlacklistService;
 use App\Services\WhitelistSyncService;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
@@ -25,11 +28,23 @@ class Fail2banStatus extends Page
 
     public array $bannedIPs = [];
 
+    public int $permanentBanCount = 0;
+
+    public string $permanentBlacklistUrl = '';
+
     public string $quickUnbanIP = '';
 
     public bool $addToWhitelist = false;
 
     public string $manualBanIP = '';
+
+    public bool $alsoPermanent = false;
+
+    /** On-page feedback (Filament toasts are unreliable on this page in Safari). */
+    public string $actionFlash = '';
+
+    /** @var 'success'|'warning'|'danger'|'' */
+    public string $actionFlashType = '';
 
     /**
      * Resolve per request — Livewire rehydration does not re-run mount(), so a
@@ -38,6 +53,27 @@ class Fail2banStatus extends Page
     protected function fail2ban(): Fail2banService
     {
         return app(Fail2banService::class);
+    }
+
+    /**
+     * @param  'success'|'warning'|'danger'  $type
+     */
+    protected function flash(string $type, string $title, ?string $body = null): void
+    {
+        $this->actionFlashType = $type;
+        $this->actionFlash = $body !== null && $body !== '' ? "{$title} — {$body}" : $title;
+
+        $n = Notification::make()->title($title);
+        if ($body !== null && $body !== '') {
+            $n->body($body);
+        }
+        match ($type) {
+            'danger' => $n->danger(),
+            'warning' => $n->warning(),
+            default => $n->success(),
+        };
+        // Persistent so a missed toast still shows in the notification tray until dismissed.
+        $n->persistent()->send();
     }
 
     public function mount(): void
@@ -57,6 +93,7 @@ class Fail2banStatus extends Page
                 return $this->fail2ban()->getStatus();
             });
             $this->bannedIPs = $this->status['banned_ips'] ?? [];
+            $this->refreshPermanentBanSummary();
 
             // Show notification if service is not running
             if (isset($this->status['error'])) {
@@ -82,6 +119,18 @@ class Fail2banStatus extends Page
                 'error' => $e->getMessage(),
             ];
             $this->bannedIPs = [];
+            $this->refreshPermanentBanSummary();
+        }
+    }
+
+    protected function refreshPermanentBanSummary(): void
+    {
+        $this->permanentBanCount = Fail2banBlacklist::query()->count();
+        // Prefer named Filament URL; fall back if route cache is stale (common after tip).
+        try {
+            $this->permanentBlacklistUrl = Fail2banBlacklistResource::getUrl('index');
+        } catch (\Throwable) {
+            $this->permanentBlacklistUrl = url('/admin/fail2ban-blacklists');
         }
     }
 
@@ -89,11 +138,7 @@ class Fail2banStatus extends Page
     {
         try {
             if ($this->fail2ban()->unbanIP($ip)) {
-                Notification::make()
-                    ->title('IP Unbanned')
-                    ->body("IP {$ip} has been unbanned successfully.")
-                    ->success()
-                    ->send();
+                $this->flash('success', 'IP Unbanned', "{$ip} has been unbanned.");
 
                 // Optionally add to whitelist
                 if ($this->addToWhitelist) {
@@ -102,20 +147,12 @@ class Fail2banStatus extends Page
 
                 // Clear cache and reload
                 Cache::forget('fail2ban_status');
-                $this->loadStatus();
+                $this->loadStatus(true);
             } else {
-                Notification::make()
-                    ->title('Failed to Unban IP')
-                    ->body("Could not unban IP {$ip}. Check logs for details.")
-                    ->danger()
-                    ->send();
+                $this->flash('danger', 'Failed to Unban IP', "Could not unban {$ip}. Check logs for details.");
             }
         } catch (\Exception $e) {
-            Notification::make()
-                ->title('Error')
-                ->body($e->getMessage())
-                ->danger()
-                ->send();
+            $this->flash('danger', 'Error', $e->getMessage());
         }
     }
 
@@ -123,77 +160,109 @@ class Fail2banStatus extends Page
     {
         try {
             if ($this->fail2ban()->unbanAll()) {
-                Notification::make()
-                    ->title('All IPs Unbanned')
-                    ->body('All banned IPs have been unbanned.')
-                    ->warning()
-                    ->send();
+                $this->flash('warning', 'All IPs Unbanned', 'All banned IPs have been unbanned.');
 
                 Cache::forget('fail2ban_status');
-                $this->loadStatus();
+                $this->loadStatus(true);
             }
         } catch (\Exception $e) {
-            Notification::make()
-                ->title('Error')
-                ->body($e->getMessage())
-                ->danger()
-                ->send();
+            $this->flash('danger', 'Error', $e->getMessage());
         }
     }
 
     public function quickUnban(): void
     {
-        if (empty($this->quickUnbanIP)) {
-            Notification::make()
-                ->title('IP Required')
-                ->body('Please enter an IP address to unban.')
-                ->warning()
-                ->send();
+        $ip = trim($this->quickUnbanIP);
+        if ($ip === '') {
+            $this->flash('warning', 'IP Required', 'Please enter an IP address to unban.');
 
             return;
         }
 
-        $this->unbanIP($this->quickUnbanIP);
+        if (! filter_var($ip, FILTER_VALIDATE_IP)) {
+            $this->flash('warning', 'Invalid IP', "{$ip} is not a valid IPv4 or IPv6 address.");
+
+            return;
+        }
+
+        $this->unbanIP($ip);
         $this->quickUnbanIP = '';
         $this->addToWhitelist = false;
     }
 
     public function manualBan(): void
     {
-        if (empty($this->manualBanIP)) {
-            Notification::make()
-                ->title('IP Required')
-                ->body('Please enter an IP address to ban.')
-                ->warning()
-                ->send();
+        $ip = trim($this->manualBanIP);
+        if ($ip === '') {
+            $this->flash('warning', 'IP Required', 'Please enter an IP address to ban.');
+
+            return;
+        }
+
+        if (! filter_var($ip, FILTER_VALIDATE_IP)) {
+            $this->flash('warning', 'Invalid IP', "{$ip} is not a valid IPv4 or IPv6 address.");
+
+            return;
+        }
+
+        $alreadyBanned = in_array($ip, $this->bannedIPs, true);
+        $wantPermanent = $this->alsoPermanent;
+
+        try {
+            if ($this->fail2ban()->banIP($ip)) {
+                if ($wantPermanent) {
+                    $this->banPermanently($ip, 'Manual ban from Status (also permanent)');
+                    $this->manualBanIP = '';
+                    $this->alsoPermanent = false;
+                    Cache::forget('fail2ban_status');
+                    $this->loadStatus(true);
+
+                    return;
+                }
+
+                if ($alreadyBanned) {
+                    $this->flash(
+                        'success',
+                        'Already banned',
+                        "{$ip} was already in the jail; ban command OK."
+                    );
+                } else {
+                    $this->flash('success', 'IP Banned', "{$ip} has been banned (short-term).");
+                }
+
+                $this->manualBanIP = '';
+                Cache::forget('fail2ban_status');
+                $this->loadStatus(true);
+            } else {
+                $this->flash('danger', 'Failed to Ban IP', "Could not ban {$ip}. Check logs for details.");
+            }
+        } catch (\Exception $e) {
+            $this->flash('danger', 'Error', $e->getMessage());
+        }
+    }
+
+    public function banPermanently(string $ip, string $reason = 'Banned permanently from Fail2ban Status'): void
+    {
+        $ip = trim($ip);
+        if ($ip === '' || ! filter_var($ip, FILTER_VALIDATE_IP)) {
+            $this->flash('warning', 'Invalid IP', 'Cannot permanently ban an invalid address.');
 
             return;
         }
 
         try {
-            if ($this->fail2ban()->banIP($this->manualBanIP)) {
-                Notification::make()
-                    ->title('IP Banned')
-                    ->body("IP {$this->manualBanIP} has been banned.")
-                    ->success()
-                    ->send();
-
-                $this->manualBanIP = '';
-                Cache::forget('fail2ban_status');
-                $this->loadStatus();
-            } else {
-                Notification::make()
-                    ->title('Failed to Ban IP')
-                    ->body("Could not ban IP {$this->manualBanIP}. Check logs for details.")
-                    ->danger()
-                    ->send();
-            }
+            $result = app(PermanentBlacklistService::class)->add(
+                $ip,
+                $reason,
+                Fail2banBlacklist::SOURCE_MANUAL,
+                null,
+                auth()->id(),
+            );
+            $type = $result['synced'] ? 'success' : 'warning';
+            $this->flash($type, $result['created'] ? 'Permanently banned' : 'Already permanent', $result['message']);
+            $this->refreshPermanentBanSummary();
         } catch (\Exception $e) {
-            Notification::make()
-                ->title('Error')
-                ->body($e->getMessage())
-                ->danger()
-                ->send();
+            $this->flash('danger', 'Permanent ban failed', $e->getMessage());
         }
     }
 

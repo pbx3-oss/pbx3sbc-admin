@@ -2,54 +2,60 @@
 
 namespace App\Services\Ops;
 
+use App\Models\Fail2banBanStat;
+use App\Models\Fail2banBlacklist;
+use App\Models\Fail2banSetting;
 use App\Services\Fail2banService;
+use App\Services\PermanentBlacklistService;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Diff Fail2ban banned IPs vs last poll; emit new bans to Gatekeeper.
- * First run seeds state without mailing (avoids flooding existing bans).
+ * Diff Fail2ban banned IPs vs last poll:
+ * - always increment lifetime ban_stats + auto-promote to permanent blacklist
+ * - optionally emit Gatekeeper fail2ban_ban events when notify is enabled
+ *
+ * First run seeds state without counting/mailing (avoids flooding existing bans).
  */
 final class Fail2banBanNotifyScanner
 {
     public function __construct(
         private readonly Fail2banService $fail2ban,
         private readonly GatekeeperOpsClient $gatekeeper,
+        private readonly PermanentBlacklistService $permanentBlacklist,
     ) {
     }
 
     /**
      * @return array{
-     *   enabled: bool,
+     *   notify_enabled: bool,
      *   seeded: bool,
      *   current: int,
      *   new: int,
      *   emitted: int,
+     *   promoted: int,
+     *   stats_incremented: int,
      *   skipped_cap: int,
-     *   errors: list<string>
+     *   errors: list<string>,
+     *   enabled: bool
      * }
      */
     public function run(): array
     {
         $result = [
-            'enabled' => false,
+            'notify_enabled' => false,
+            'enabled' => true,
             'seeded' => false,
             'current' => 0,
             'new' => 0,
             'emitted' => 0,
+            'promoted' => 0,
+            'stats_incremented' => 0,
             'skipped_cap' => 0,
             'errors' => [],
         ];
 
-        if (! filter_var(config('pbx3_ops.fail2ban_ban_notify_enabled', false), FILTER_VALIDATE_BOOL)) {
-            return $result;
-        }
-        $result['enabled'] = true;
-
-        if (! $this->gatekeeper->isConfigured()) {
-            $result['errors'][] = 'Gatekeeper URL/token not configured';
-
-            return $result;
-        }
+        $notifyEnabled = filter_var(config('pbx3_ops.fail2ban_ban_notify_enabled', false), FILTER_VALIDATE_BOOL);
+        $result['notify_enabled'] = $notifyEnabled;
 
         try {
             $status = $this->fail2ban->getStatus();
@@ -88,10 +94,51 @@ final class Fail2banBanNotifyScanner
         $new = array_values(array_diff($current, $known));
         $result['new'] = count($new);
 
+        $threshold = Fail2banSetting::autoPermaThreshold();
         $maxEmits = max(1, (int) config('pbx3_ops.max_emits_per_run', 10));
         $fqdn = $this->sbcFqdn();
-        $toEmit = array_slice($new, 0, $maxEmits);
-        $result['skipped_cap'] = max(0, count($new) - count($toEmit));
+        $toEmit = $notifyEnabled ? array_slice($new, 0, $maxEmits) : [];
+        $result['skipped_cap'] = $notifyEnabled ? max(0, count($new) - count($toEmit)) : 0;
+
+        if ($notifyEnabled && ! $this->gatekeeper->isConfigured()) {
+            $result['errors'][] = 'Gatekeeper URL/token not configured (notify skipped; stats still applied)';
+            $toEmit = [];
+        }
+
+        foreach ($new as $ip) {
+            $count = $this->incrementBanStat($ip);
+            $result['stats_incremented']++;
+
+            if ($threshold > 0 && $count >= $threshold) {
+                if ($this->permanentBlacklist->isWhitelisted($ip)) {
+                    continue;
+                }
+                if (Fail2banBlacklist::query()->where('ip_or_cidr', $ip)->exists()) {
+                    continue;
+                }
+                try {
+                    $add = $this->permanentBlacklist->add(
+                        $ip,
+                        "Auto-promoted after {$count} temp bans",
+                        Fail2banBlacklist::SOURCE_AUTO,
+                        $count,
+                        null,
+                    );
+                    if ($add['created']) {
+                        $result['promoted']++;
+                    }
+                    if (! $add['synced']) {
+                        $result['errors'][] = "{$ip}: permanent blacklist sync failed";
+                    }
+                } catch (\Throwable $e) {
+                    $result['errors'][] = "{$ip} promote: ".$e->getMessage();
+                    Log::warning('fail2ban auto-promote failed', [
+                        'ip' => $ip,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+        }
 
         foreach ($toEmit as $ip) {
             try {
@@ -112,11 +159,24 @@ final class Fail2banBanNotifyScanner
             }
         }
 
-        // Persist full current set even if emit failed — avoids re-storm on next tick
-        // for IPs we already attempted (Gatekeeper throttle covers true duplicates).
         $this->writeState($statePath, $current);
 
         return $result;
+    }
+
+    private function incrementBanStat(string $ip): int
+    {
+        $now = now();
+        $stat = Fail2banBanStat::query()->firstOrNew(['ip' => $ip]);
+        if (! $stat->exists) {
+            $stat->ban_count = 0;
+            $stat->first_banned_at = $now;
+        }
+        $stat->ban_count = (int) $stat->ban_count + 1;
+        $stat->last_banned_at = $now;
+        $stat->save();
+
+        return (int) $stat->ban_count;
     }
 
     private function sbcFqdn(): string
