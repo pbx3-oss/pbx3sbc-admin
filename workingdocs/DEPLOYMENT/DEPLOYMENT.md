@@ -27,6 +27,7 @@ sudo ./install.sh [--db-host HOST] [--db-user USER] [--db-password PASSWORD] [--
 - ✅ Auto-installs Composer
 - ✅ Auto-configures Nginx with Laravel-optimized settings
 - ✅ Auto-configures PHP-FPM socket detection
+- ✅ Installs PHP-FPM drop-in **`session.upload_progress.enabled = Off`** (`deploy/php/99-pbx3sbc-session.ini` via `scripts/apply-php-session-hardening.sh`; tip-safe). Product note: pbx3 **`PHP_SESSION_UPLOAD_PROGRESS_STOPGAP.md`**.
 - ✅ Auto-configures database connection
 - ✅ Auto-sets file permissions
 - ✅ Handles Composer lock file incompatibilities
