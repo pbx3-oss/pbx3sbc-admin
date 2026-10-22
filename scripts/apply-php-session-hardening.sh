@@ -1,6 +1,6 @@
 #!/bin/sh
-# Install session.upload_progress Off into PHP-FPM (+ CLI) conf.d.
-# Idempotent: safe from install.sh and tip-upgrade ops.
+# Install session.upload_progress Off into PHP-FPM (+ CLI) conf.d
+# (locked permanent — product unused). Idempotent: install.sh + tip ops.
 #
 # Usage: sudo ./scripts/apply-php-session-hardening.sh
 set -eu
