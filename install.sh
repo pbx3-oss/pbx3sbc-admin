@@ -1892,22 +1892,22 @@ main() {
 apply_php_session_hardening() {
     local helper="${INSTALL_DIR}/scripts/apply-php-session-hardening.sh"
     if [[ -x "$helper" ]]; then
-        log_info "Applying PHP session.upload_progress Off stopgap..."
+        log_info "Applying PHP session.upload_progress Off (locked permanent)..."
         if "$helper"; then
-            log_success "PHP session upload_progress disabled (FPM conf.d)"
+            log_success "PHP session upload_progress Off (FPM conf.d)"
         else
             log_warn "apply-php-session-hardening.sh failed — re-run: sudo $helper"
         fi
     elif [[ -f "$helper" ]]; then
         chmod +x "$helper" 2>/dev/null || true
-        log_info "Applying PHP session.upload_progress Off stopgap..."
+        log_info "Applying PHP session.upload_progress Off (locked permanent)..."
         if "$helper"; then
-            log_success "PHP session upload_progress disabled (FPM conf.d)"
+            log_success "PHP session upload_progress Off (FPM conf.d)"
         else
             log_warn "apply-php-session-hardening.sh failed — re-run: sudo $helper"
         fi
     else
-        log_warn "Missing $helper — skip session.upload_progress stopgap"
+        log_warn "Missing $helper — skip session.upload_progress Off drop-in"
     fi
 }
 
